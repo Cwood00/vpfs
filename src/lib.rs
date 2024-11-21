@@ -6,23 +6,46 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub mod messages;
+use messages::*;
 
+pub struct VPFS {
+    pub root: Node,
+    pub local: Node,
+    files: Mutex<HashMap<String, Location>>,
+    connections: Mutex<HashMap<Node, TcpStream>>,
+}
 
 impl VPFS {
     fn handle_client(vpfs: Arc<VPFS>, mut stream: TcpStream) {
         loop {        
-            match Self::receive_request(&mut stream) {            
+            match Self::receive_request(&mut stream) {       
+
                 Request::Place ( file_name, location ) => {
                     let mut files = vpfs.files.lock().unwrap();
-                    files.insert(file_name.clone(), location);                
-                    let response = Response::Success;
+                    files.insert(file_name.to_string(), location.clone());                
+                    let response = Response::Place;
                     Self::send_response(&mut stream, response);
                 }
                 Request::Find ( file_name ) => {
                     let files = vpfs.files.lock().unwrap();
-                    let location = files.get(&file_name).cloned();
+                    let name = file_name.to_string();
+                    let location = files.get(&name).cloned();
                     let response = Response::Find(location);
                     Self::send_response(&mut stream, response);
+                },
+                Request::Read( file_name ) => {
+                    let mut reader = std::fs::File::open(file_name).unwrap();
+                    let mut buf = vec![];
+                    reader.read_to_end(&mut buf).unwrap();
+                    Self::send_response(&mut stream, Response::Read(buf.len()));                    
+                    stream.write_all(&buf);
+                }
+                Request::Write( file_name, len) => {
+                    let mut writer = std::fs::File::create(file_name).unwrap();
+                    let mut buf = vec![0u8;len];
+                    stream.read_exact(buf.as_mut()).unwrap();
+                    writer.write_all(&buf);
+                    Self::send_response(&mut stream, Response::Write(len));
                 }
             }
         }
@@ -49,12 +72,25 @@ impl VPFS {
     }
 
     pub fn create(listen_port: u16) -> Arc<VPFS> {
-        VPFS::connect(listen_port, "localhost:7777".to_string())
+        VPFS::connect(listen_port, &format!("localhost:{listen_port}"))
     }
 
-    pub fn connect(listen_port: u16, addr: String) -> Arc<VPFS> {
+    pub fn stream_for(&self, node: &Node) -> TcpStream {
+        let mut connections = self.connections.lock().unwrap();
+        if let Some(ref stream) = connections.get(node) {
+            stream.try_clone().unwrap()
+        }
+        else {
+            let mut stream = TcpStream::connect(&node.addr).expect("Failed to connect to server");
+            connections.insert(node.clone(), stream);
+            connections.get(node).unwrap().try_clone().unwrap()
+        }
+    }
+
+    pub fn connect(listen_port: u16, addr: &str) -> Arc<VPFS> {
         let vpfs = Arc::new(VPFS { 
-            root: Node { addr: addr.clone() },
+            root: Node { addr: addr.to_string() },
+            local: Node { addr: format!("localhost:{}",listen_port) },
             files: Mutex::new(Default::default()),
             connections: Mutex::new(Default::default()),
         });
@@ -69,15 +105,22 @@ impl VPFS {
         vpfs
     }
 
-    fn send_request(&self, node: Node, req: Request) -> Response {
-        let connections = self.connections.lock().unwrap();
-        let stream = connections.get(&node).unwrap();
-        serde_bare::to_writer(stream, &req).unwrap();
+    fn send_request_async(&self, node: &Node, req: Request) {
+        serde_bare::to_writer(self.stream_for(node), &req).unwrap();
+    }
+    fn receive_response_async(&self, node: &Node) -> Response {
+        let resp = serde_bare::from_reader(self.stream_for(node)).unwrap();
+        resp
+    }
+
+    fn send_request(&self, node: &Node, req: Request) -> Response {
+        let mut stream = self.stream_for(node);
+        serde_bare::to_writer(&mut stream, &req).unwrap();
         let resp = serde_bare::from_reader(stream).unwrap();
         resp
     }
 
-    fn receive_request(stream: &mut TcpStream) -> Request {
+    fn receive_request<'a> (stream: &'a mut TcpStream) -> Request {
         serde_bare::from_reader(stream).unwrap()
     }
 
@@ -89,18 +132,55 @@ impl VPFS {
         serde_bare::from_reader(stream).unwrap()
     }
 
-    pub fn find(&self, name: String) -> Option<Location> {
-        if let Response::Find(loc) = self.send_request(self.root.clone(), Request::Find(name)) {
+    pub fn find(&self, name: &str) -> Option<Location> {
+        if let Response::Find(loc) = self.send_request(&self.root, Request::Find(name.to_string())) {
             loc
         } else {
             panic!("mismatched response");
         }
     }
 
-    pub fn place(&self, name: String, at: Location) {
-        if let Response::Success = self.send_request(self.root.clone(), Request::Place(name, at)) {
+    pub fn place(&self, name: &str, at: Location) {
+        if let Response::Place = self.send_request(&self.root, Request::Place(name.to_string(), at)) {
         } else {
             panic!("mismatched response");
         }
+    }
+
+    pub fn read(&self, what: Location) -> Vec<u8> {
+        if let Response::Read(len) = self.send_request(&what.node, Request::Read(what.path)) {
+            let mut buf=vec![0u8;len];
+            self.connections.lock().unwrap().get(&what.node).unwrap().read_exact(&mut buf);
+            buf
+        }
+        else {
+            panic!("bad response to read!");
+        }
+    } 
+    pub fn write(&self, what: Location, buf: &[u8]) {
+        self.send_request_async(&what.node, Request::Write(what.path, buf.len()));
+        self.connections.lock().unwrap().get(&what.node).unwrap().write(buf);
+
+        if let Response::Write(len) = self.receive_response_async(&what.node) {
+            assert!(len == buf.len());
+        }
+        else {
+            panic!("Bad response to write!");
+        }
+
+    } 
+
+    fn local_file(&self, name: &str) -> Location {
+        Location{node: self.local.clone(), path: name.to_string()}
+    }
+
+    pub fn fetch(&self, name: &str) -> Vec<u8> {
+        self.read(self.find(name).unwrap())
+    }   
+
+    pub fn store(&self, name: &str, buf: &[u8]) {        
+        let location = self.local_file(name);
+        self.write(location.clone(),buf);
+        self.place(name,location);
     }
 }

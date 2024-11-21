@@ -4,30 +4,28 @@ use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
 
 #[derive(Serialize,Deserialize)]
-enum Request {
+pub enum Request {
     Find(String),
-    Place(String,Location)
+    Place(String,Location),
+    Read(String),
+    Write(String,usize)
 }
 
 #[derive(Serialize,Deserialize)]
-enum Response {
+pub enum Response {
     Find(Option<Location>),
-    Success
+    Place,
+    Read(usize),
+    Write(usize)
 }
 
-#[derive(Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
+#[derive(Debug,Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
 pub struct Location {
     pub node: Node,
     pub path: String
 }
 
-#[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq)]
+#[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
 pub struct Node {
     pub addr: String
-}
-
-pub struct VPFS {
-    root: Node,
-    files: Mutex<HashMap<String, Location>>,
-    connections: Mutex<HashMap<Node, TcpStream>>,
 }
