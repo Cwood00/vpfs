@@ -1,0 +1,11 @@
+set terminal pdf lw 2
+set output "plot.pdf"
+set xlabel "File Size (kB)"
+set ylabel "Time(ms)"
+set logscale xy
+set key top left
+plot [1:]           "remote_sl.txt" using (2**$1/1024):2 with lp pt 2 ti "Remote FS (Starlink)",\
+          "remote.txt" using (2**$1/1024):2 with lp pt 2 ti "Remote FS (AT\\&T Fiber)",\
+          "local_sl.txt" using (2**$1/1024):2 with lp pt 1 ti "VPFS (Starlink)",\
+"local.txt" using (2**$1/1024):2 with lp pt 1 ti "VPFS (AT\\&T Fiber)"
+
