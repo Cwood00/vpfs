@@ -22,10 +22,17 @@ pub enum Response {
 #[derive(Debug,Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
 pub struct Location {
     pub node: Node,
-    pub path: String
+    pub uri: String
 }
 
 #[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
 pub struct Node {
     pub addr: String
+}
+
+#[derive(Serialize,Deserialize)]
+pub struct DirectoryEntry {
+    pub location: Location,
+    pub name: String,
+    pub is_dir: bool
 }
