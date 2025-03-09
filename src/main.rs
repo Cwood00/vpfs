@@ -164,6 +164,7 @@ pub fn main() {
         println!("creating");
         create_root(opt.port)
     } else {
+        println!("running");
         create(opt.port)
     };
 }
