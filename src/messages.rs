@@ -5,18 +5,20 @@ use std::sync::{Arc,Mutex};
 
 #[derive(Serialize,Deserialize)]
 pub enum Request {
-    Find(String),
-    Place(String,Location),
+    Find(String, String),
+    Place,
     Read(String),
-    Write(String,usize)
+    Write(String,usize),
+    AppendDirectoryEntry(String, DirectoryEntry)
 }
 
 #[derive(Serialize,Deserialize)]
 pub enum Response {
     Find(Option<Location>),
-    Place,
+    Place(String),
     Read(usize),
-    Write(usize)
+    Write(usize),
+    AppendDirectoryEntry(bool)
 }
 
 #[derive(Debug,Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
