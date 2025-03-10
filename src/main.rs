@@ -58,29 +58,11 @@ fn handle_client(mut stream: TcpStream) {
         match receive_request(&mut stream) {
 
             Request::Place  => {
-                // let mut files = vpfs.files.lock().unwrap();
-                // files.insert(file_name.to_string(), location.clone());
-                // fs::File::create_new(location.uri);
                 let response = Response::Place(create_file_with_random_uri());
                 send_response(&mut stream, response);
             }
             Request::Find ( file_name, parent_directory_uri ) => {
-                // let files = vpfs.files.lock().unwrap();
-                // let name = file_name.to_string();
-                // let location = files.get(&name).cloned();
-                // let location = if fs::exists(&file_name).unwrap() {
-                //     Some(Location{node: Node{addr: String::from("127.0.0.1:8080")}, uri: file_name})
-                // }
-                // else {
-                //     None
-                // };
-                // let response = Response::Find(FindResponce::FinalLocation(location));
-                let response = if let Some(directory_entry) = search_directory(file_name, parent_directory_uri) {
-                    Response::Find(Some(directory_entry.location))
-                }
-                else {
-                    Response::Find(None)
-                };
+                let response = Response::Find(search_directory(file_name, parent_directory_uri));
                 send_response(&mut stream, response);
             },
             Request::Read( uri ) => {
@@ -130,7 +112,7 @@ fn setup_files_dir() {
             panic!("Could not create directory for string files");
         }
     }
-    std::env::set_current_dir("./files");
+    std::env::set_current_dir("./files").unwrap();
 }
 
 pub fn create_root(listen_port: u16) {

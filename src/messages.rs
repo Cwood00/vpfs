@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::clone;
 use std::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
@@ -14,7 +15,7 @@ pub enum Request {
 
 #[derive(Serialize,Deserialize)]
 pub enum Response {
-    Find(Option<Location>),
+    Find(Option<DirectoryEntry>),
     Place(String),
     Read(usize),
     Write(usize),
@@ -32,7 +33,7 @@ pub struct Node {
     pub addr: String
 }
 
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
 pub struct DirectoryEntry {
     pub location: Location,
     pub name: String,
