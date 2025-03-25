@@ -10,6 +10,7 @@ pub enum Request {
     Place,
     Read(String),
     Write(String,usize),
+    Remove(String),
     AppendDirectoryEntry(String, DirectoryEntry)
 }
 
@@ -19,7 +20,8 @@ pub enum Response {
     Place(String),
     Read(usize),
     Write(usize),
-    AppendDirectoryEntry(bool)
+    Remove(Result<(), ()>),
+    AppendDirectoryEntry(Result<(), ()>)
 }
 
 #[derive(Debug,Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
