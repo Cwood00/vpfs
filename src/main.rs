@@ -3,7 +3,7 @@ use rand::Rng;
 use std::fmt::format;
 use std::io::{Read, Write, self};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, sleep};
 use std::fs;
 use std::time::Duration;
@@ -29,6 +29,8 @@ struct Opt {
     artificial_latency: u64,
 }
 
+static FILE_ACCESS_LOCK: RwLock<()> = RwLock::new(());
+
 fn create_file_with_random_uri() -> String {
     let mut rng = rand::rng();
     let mut uri = format!("{:x}", rng.random::<u64>());
@@ -46,7 +48,7 @@ fn create_file_with_random_uri() -> String {
     uri
 }
 
-fn search_directory(file_name: &str, directory_uri: &str) -> Option<DirectoryEntry> {
+fn search_directory_with_lock(file_name: &str, directory_uri: &str) -> Option<DirectoryEntry> {
     let directory_file = fs::File::open(directory_uri).unwrap();
     let mut read_result: Result<DirectoryEntry, serde_bare::error::Error> = serde_bare::from_reader(&directory_file);
     while let Ok(entry) = read_result {
@@ -55,8 +57,12 @@ fn search_directory(file_name: &str, directory_uri: &str) -> Option<DirectoryEnt
         }
         read_result = serde_bare::from_reader(&directory_file);
     }
-
     None
+}
+
+fn search_directory(file_name: &str, directory_uri: &str) -> Option<DirectoryEntry> {
+    let _fs_lock = FILE_ACCESS_LOCK.read().unwrap();
+    search_directory_with_lock(file_name, directory_uri)
 }
 
 fn handle_client(mut stream: TcpStream, artificial_latency: u64) {
@@ -71,30 +77,37 @@ fn handle_client(mut stream: TcpStream, artificial_latency: u64) {
                 send_response(&mut stream, response);
             },
             Ok(Request::Read( uri )) => {
+                let fs_lock = FILE_ACCESS_LOCK.read().unwrap();
                 let mut reader = std::fs::File::open(uri).unwrap();
                 let mut buf = vec![];
                 reader.read_to_end(&mut buf).unwrap();
+                drop(fs_lock);
                 send_response(&mut stream, Response::Read(buf.len()));                    
                 stream.write_all(&buf);
             }
             Ok(Request::Write( file_name, len)) => {
+                let fs_lock = FILE_ACCESS_LOCK.write().unwrap();
                 let mut writer = std::fs::File::create(file_name).unwrap();
                 let mut buf = vec![0u8;len];
                 stream.read_exact(buf.as_mut()).unwrap();
                 writer.write_all(&buf);
+                drop(fs_lock);
                 send_response(&mut stream, Response::Write(len));
             }
             Ok(Request::AppendDirectoryEntry(directory,new_entry )) => {
                 // Check if the directory entry already exists
-                if search_directory(&new_entry.name, &directory).is_some() {
+                let fs_lock = FILE_ACCESS_LOCK.write().unwrap();
+                if search_directory_with_lock(&new_entry.name, &directory).is_some() {
                     send_response(&mut stream, Response::AppendDirectoryEntry(Err(())));
                     continue;
                 }
                 let dir_file = fs::OpenOptions::new().append(true).open(directory).unwrap();
                 serde_bare::to_writer(dir_file, &new_entry).unwrap();
+                drop(fs_lock);
                 send_response(&mut stream, Response::AppendDirectoryEntry(Ok(())));
             }
             Ok(Request::Remove(uri)) => {
+                let _fs_lock = FILE_ACCESS_LOCK.write().unwrap();
                 if fs::remove_file(uri).is_ok() {
                     send_response(&mut stream, Response::Remove(Ok(())));
                 } else {
