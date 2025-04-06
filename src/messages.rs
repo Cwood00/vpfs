@@ -5,23 +5,53 @@ use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
 
 #[derive(Serialize,Deserialize)]
-pub enum Request {
-    Find(String, String),
-    Place,
-    Read(String),
-    Write(String,usize),
-    Remove(String),
-    AppendDirectoryEntry(String, DirectoryEntry)
+pub enum Hello {
+    ClientHello,
+    DaemonHello(Node, u16),
 }
 
 #[derive(Serialize,Deserialize)]
-pub enum Response {
+pub enum HelloResponse {
+    ClientHello(Node),
+    DaemonHello(HashMap<Node, String>),
+}
+
+#[derive(Serialize,Deserialize)]
+pub enum DaemonRequest {
+    Find(String, String),
+    Place,
+    Read(String),
+    Write(String, usize),
+    Remove(String),
+    AppendDirectoryEntry(String, DirectoryEntry),
+}
+
+#[derive(Serialize,Deserialize)]
+pub enum DaemonResponse {
     Find(Option<DirectoryEntry>),
     Place(String),
     Read(usize),
     Write(usize),
     Remove(Result<(), ()>),
-    AppendDirectoryEntry(Result<(), ()>)
+    AppendDirectoryEntry(Result<(), ()>),
+}
+
+#[derive(Serialize,Deserialize)]
+pub enum ClientRequest {
+    Find(String),
+    Place(String, Node),
+    Mkdir(String, Node),
+    Read(Location),
+    Write(Location, usize),
+}
+
+#[derive(Serialize,Deserialize)]
+pub enum ClientResponse {
+    Find(Option<DirectoryEntry>),
+    Place(Option<Location>),
+    Mkdir(Option<Location>),
+    Read(usize),
+    Write(usize),
 }
 
 #[derive(Debug,Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
@@ -32,7 +62,7 @@ pub struct Location {
 
 #[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
 pub struct Node {
-    pub addr: String
+    pub name: String
 }
 
 #[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
