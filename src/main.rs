@@ -328,7 +328,10 @@ fn handle_client(mut stream: TcpStream, state: Arc<DaemonState>) {
             Ok(ClientRequest::Write(location,len)) => {
                 handle_client_write(&mut stream, location, len, &state);
             }
-            Err(_) => break
+            Err(_) => {
+                println!("Client diconnected");
+                break;
+            }
         }
     }
 }
@@ -374,7 +377,10 @@ fn handle_daemon(mut stream: TcpStream, state: Arc<DaemonState>) {
                     send_message(&mut stream, DaemonResponse::Remove(Err(())));
                 }
             }
-            Err(_) => break
+            Err(_) => {
+                println!("Daemon dissconnected");
+                break;
+            }
         }
     }
 }
@@ -383,22 +389,25 @@ fn handle_daemon(mut stream: TcpStream, state: Arc<DaemonState>) {
 fn handle_connection(mut stream: TcpStream, state: Arc<DaemonState>) {
     match receive_message(&mut stream, state.artificial_latency) {
         Ok(Hello::ClientHello) => {
+            println!("User process connected");
             send_message(&mut stream, HelloResponse::ClientHello(state.local.clone()));
             handle_client(stream, state);
         },
         Ok(Hello::DaemonHello) => {
+            println!("Daemon process connected");
             send_message(&mut stream, HelloResponse::DaemonHello);
             handle_daemon(stream, state);
         }
         Ok(Hello::RootHello(connecting_node, connecting_node_port)) => {
-            let conneting_address = match stream.peer_addr().unwrap().ip() {
+            let connecting_address = match stream.peer_addr().unwrap().ip() {
                 std::net::IpAddr::V4(addr) => format!("{}:{}", addr, connecting_node_port),
                 std::net::IpAddr::V6(addr) => format!("{}:{}", addr, connecting_node_port),
             };
+            println!("Daemon process connected to root, is listening on {connecting_address}");
             {
                 let mut known_hosts = state.known_hosts.lock().unwrap();
-                known_hosts.as_mut().unwrap().insert(connecting_node, conneting_address);
-                send_message(&mut stream, HelloResponse::RootHello(state.root.clone(), state.known_hosts.lock().unwrap().clone().unwrap()));
+                known_hosts.as_mut().unwrap().insert(connecting_node, connecting_address);
+                send_message(&mut stream, HelloResponse::RootHello(state.root.clone(), known_hosts.clone().unwrap()));
             }
             handle_daemon(stream, state);
         },
@@ -409,9 +418,11 @@ fn handle_connection(mut stream: TcpStream, state: Arc<DaemonState>) {
 // Create a TCP listener to accept incoming connections
 fn start_server(address: &str, state: Arc<DaemonState>) {
     let listener = TcpListener::bind(address).unwrap();
+    println!("Listening for connections");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                println!("Incomming connections");
                 let state_clone = state.clone();
                 thread::spawn(move || {
                     handle_connection(stream, state_clone); 
@@ -446,10 +457,12 @@ fn create_root(listen_port: u16, state: DaemonState) {
 
 fn create(listen_port: u16, mut state: DaemonState, root_addr: String) {
     setup_files_dir();
-    let root_connection = TcpStream::connect(root_addr).expect("TODO handle being offline");
+    let root_connection = TcpStream::connect(&root_addr).expect("TODO handle being offline");
     serde_bare::to_writer(&root_connection, &Hello::RootHello(state.local.clone(), listen_port)).unwrap();
     if let Ok(HelloResponse::RootHello(root_node, host_names)) = serde_bare::from_reader(&root_connection,) {
-        *state.known_hosts.lock().unwrap() = Some(host_names);
+        let mut known_hosts = state.known_hosts.lock().unwrap();
+        *known_hosts = Some(host_names);
+        known_hosts.as_mut().unwrap().insert(root_node.clone(), root_addr);
         state.root = root_node;
     }
     start_server(&format!("0.0.0.0:{listen_port}"), Arc::new(state));
