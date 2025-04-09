@@ -7,13 +7,15 @@ use std::sync::{Arc,Mutex};
 #[derive(Serialize,Deserialize)]
 pub enum Hello {
     ClientHello,
-    DaemonHello(Node, u16),
+    DaemonHello,
+    RootHello(Node, u16),
 }
 
 #[derive(Serialize,Deserialize)]
 pub enum HelloResponse {
     ClientHello(Node),
-    DaemonHello(HashMap<Node, String>),
+    DaemonHello,
+    RootHello(Node, HashMap<Node, String>),
 }
 
 #[derive(Serialize,Deserialize)]
@@ -60,7 +62,7 @@ pub struct Location {
     pub uri: String
 }
 
-#[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
+#[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug,Default)]
 pub struct Node {
     pub name: String
 }
