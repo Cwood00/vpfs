@@ -3,6 +3,7 @@ use std::clone;
 use std::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
+use std::time::SystemTime;
 
 #[derive(Serialize,Deserialize)]
 pub enum Hello {
@@ -20,9 +21,8 @@ pub enum HelloResponse {
 
 #[derive(Serialize,Deserialize)]
 pub enum DaemonRequest {
-    Find(String, String),
     Place,
-    Read(String),
+    Read(String, Option<SystemTime>),
     Write(String, usize),
     Remove(String),
     AppendDirectoryEntry(String, DirectoryEntry),
@@ -30,12 +30,11 @@ pub enum DaemonRequest {
 
 #[derive(Serialize,Deserialize)]
 pub enum DaemonResponse {
-    Find(Option<DirectoryEntry>),
     Place(String),
-    Read(usize),
-    Write(usize),
-    Remove(Result<(), ()>),
-    AppendDirectoryEntry(Result<(), ()>),
+    Read(Result<usize, VPFSError>),
+    Write(Result<usize, VPFSError>),
+    Remove(Result<(), VPFSError>),
+    AppendDirectoryEntry(Result<(), VPFSError>),
 }
 
 #[derive(Serialize,Deserialize)]
@@ -49,11 +48,11 @@ pub enum ClientRequest {
 
 #[derive(Serialize,Deserialize)]
 pub enum ClientResponse {
-    Find(Option<DirectoryEntry>),
-    Place(Option<Location>),
-    Mkdir(Option<Location>),
-    Read(usize),
-    Write(usize),
+    Find(Result<DirectoryEntry, VPFSError>),
+    Place(Result<Location, VPFSError>),
+    Mkdir(Result<Location, VPFSError>),
+    Read(Result<usize, VPFSError>),
+    Write(Result<usize, VPFSError>),
 }
 
 #[derive(Debug,Clone,Eq,Hash,PartialEq,Serialize,Deserialize)]
@@ -72,4 +71,20 @@ pub struct DirectoryEntry {
     pub location: Location,
     pub name: String,
     pub is_dir: bool
+}
+
+pub struct CacheEntry {
+    pub uri: String
+}
+
+#[derive(Serialize,Deserialize,Debug)]
+pub enum VPFSError {
+    OnlyInCache,
+    NotModified,
+    DoesNotExist, // We can verify that the file does not exist
+    NotFound,     // We can not find the file. File may or may not exist
+    NotADirectory,
+    AlreadyExists,
+    CouldNotPlaceAtNode,
+    Other
 }

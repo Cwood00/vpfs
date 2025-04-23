@@ -2,11 +2,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use rand::Rng;
 use std::collections::HashMap;
-use std::fmt::format;
-use std::io::{Read, Write, self};
+use std::io::{Read, Write, BufReader, self};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::os::unix::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::thread::{self, sleep};
 use std::fs;
 use std::time::Duration;
@@ -15,6 +13,7 @@ mod messages;
 use messages::*;
 
 use clap::Parser;
+use lru::LruCache;
 
 /// A simple example of StructOpt-based CLI parsing
 #[derive(Parser, Debug)]
@@ -29,6 +28,10 @@ struct Opt {
     #[arg(short, long)]
     name: String,
 
+    //Maximum cache size in bytes
+    #[arg(short, long, default_value_t = 1 << 16)]
+    cache_size: u64,
+
     // When non-zero, artificial latency added to each request
     // Latency specified in milliseconds
     #[arg(short, long, default_value_t = 0)]
@@ -40,7 +43,9 @@ struct DaemonState {
     local: Node,
     connections: Mutex<HashMap<Node, Arc<Mutex<TcpStream>>>>,
     known_hosts: Mutex<Option<HashMap<Node, String>>>,
-    cache: (), //TODO
+    cache: Mutex<LruCache<Location, CacheEntry>>,
+    max_cache_size: u64,
+    used_cache_bytes: u64,
     artificial_latency: Duration,
     file_access_lock: RwLock<()>
 }
@@ -49,13 +54,14 @@ struct DaemonState {
 fn stream_for(node: &Node, state: &Arc<DaemonState>) -> Option<Arc<Mutex<TcpStream>>> {
     let mut connections = state.connections.lock().unwrap();
     if let Some(connection) = connections.get(&node) {
+        // TODO check if remote side of connection is still open
         return Some(connection.clone());
     }
     let known_hosts = state.known_hosts.lock().unwrap();
     if let Some(addr) = known_hosts.as_ref().unwrap().get(&node) {
         let mut stream = TcpStream::connect(&addr).expect("Failed to connect to server");
         send_message(&mut stream, Hello::DaemonHello);
-        receive_message::<HelloResponse>(&mut stream, Duration::from_millis(0)).expect("Get bad hello response");
+        receive_message::<HelloResponse>(&mut stream).expect("Got bad hello response");
         let stream_arc = Arc::new(Mutex::new(stream));
         connections.insert(node.clone(), stream_arc.clone());
         return Some(stream_arc);
@@ -63,12 +69,16 @@ fn stream_for(node: &Node, state: &Arc<DaemonState>) -> Option<Arc<Mutex<TcpStre
     todo!("query root for new connections");
 }
 
-fn receive_message<T: DeserializeOwned> (stream: &mut TcpStream, artificial_latency: Duration) -> Result<T, serde_bare::error::Error> {
+fn receive_message_with_latceny<T: DeserializeOwned>(stream: &mut TcpStream, artificial_latency: Duration) -> Result<T, serde_bare::error::Error> {
     let request = serde_bare::from_reader(stream);
     if artificial_latency > Duration::from_millis(0) {
         sleep(artificial_latency);
     }
     request
+}
+
+fn receive_message<T: DeserializeOwned> (stream: &mut TcpStream) -> Result<T, serde_bare::error::Error> {
+    receive_message_with_latceny(stream, Duration::from_millis(0))
 }
 
 fn send_message <T: Serialize>(stream: &mut TcpStream, message: T) {
@@ -79,21 +89,75 @@ fn send_and_recive <T: Serialize, U: DeserializeOwned> (node: &Node, message: T,
     if let Some(node_connection_lock) = stream_for(node, state) {
         let mut node_connection = node_connection_lock.lock().unwrap();
         send_message(&mut node_connection, message);
-        receive_message(&mut node_connection, Duration::from_millis(0))
+        receive_message(&mut node_connection)
     }
     else {
         todo!("handle not being able to connect");
     }
 }
 
-fn read_local(uri: &str, buf: &mut Vec<u8>) {
-    let mut reader = std::fs::File::open(uri).unwrap();
-    reader.read_to_end(buf).unwrap();
+fn read_local(uri: &str, fs_lock: &RwLock<()>) -> io::Result<Vec<u8>>{
+    fs_lock.read().unwrap();
+    fs::read(uri)
 }
 
-fn write_local(uri: &str,  data: &Vec<u8>) {
-    let mut writer = std::fs::File::create(uri).unwrap();
-    writer.write_all(&data);
+fn read_remote(location: &Location, state: &Arc<DaemonState>) -> Result<Vec<u8>, VPFSError> {
+    let mut cache = state.cache.lock().unwrap();
+    let cache_entry = cache.get(&location);
+    let cache_last_update_time = if let Some(cache_entry) = cache_entry {
+        if let Ok(file_data) = fs::metadata(&cache_entry.uri) {
+            file_data.modified().ok()
+        }
+        else {
+            None
+        }
+    }
+    else {
+        None
+    };
+    if let Some(file_owner_connection) = stream_for(&location.node, state) {
+        let mut file_owner_connection = file_owner_connection.lock().unwrap();
+        send_message(&mut file_owner_connection, DaemonRequest::Read(location.uri.clone(), cache_last_update_time));
+
+        match receive_message(&mut file_owner_connection) {
+            Ok(DaemonResponse::Read(Ok(file_len))) => {
+                let mut buf = vec![0u8; file_len];
+                file_owner_connection.read_exact(&mut buf);
+
+                add_cache_entry(location, &buf, &mut cache);
+
+                Ok(buf)
+            },
+            Ok(DaemonResponse::Read(Err(VPFSError::NotModified))) => {
+                todo!("send cached versoin")
+            }
+            Ok(DaemonResponse::Read(Err(error))) => {
+                Err(error)
+            },
+            Ok(_) => panic!("Bad responce"),
+            Err(_) => {
+                todo!("Check if error came from bad responce, or from connection closing")
+            }
+        }
+    }
+    else {
+        if cache_entry.is_some() {
+            Err(VPFSError::OnlyInCache)
+        }
+        else {
+            Err(VPFSError::NotFound)
+        }
+    }
+}
+
+fn write_local(uri: &str,  data: &Vec<u8>, fs_lock: &RwLock<()>) -> io::Result<()>{
+    fs_lock.write().unwrap();
+    if fs::exists(uri)? {
+        fs::write(uri, data)
+    }
+    else {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
 }
 
 fn create_file_with_random_uri() -> String {
@@ -113,29 +177,35 @@ fn create_file_with_random_uri() -> String {
     uri
 }
 
-// Assumes caller hold file lock
-fn search_directory_with_lock(file_name: &str, directory_uri: &str) -> Option<DirectoryEntry> {
-    let directory_file = fs::File::open(directory_uri).unwrap();
-    let mut read_result: Result<DirectoryEntry, serde_bare::error::Error> = serde_bare::from_reader(&directory_file);
+fn search_directory_with_reader<T: Read>(file_name: &str, directory_reader: &mut T) -> Result<DirectoryEntry, VPFSError> {
+    let mut read_result: Result<DirectoryEntry, serde_bare::error::Error> = serde_bare::from_reader(&mut *directory_reader);
+    let mut dir_entry = Err(VPFSError::DoesNotExist);
     while let Ok(entry) = read_result {
-        if entry.name == file_name {
-            return Some(entry);
+        if entry.name == file_name{
+            dir_entry = Ok(entry);
+            break;
         }
-        read_result = serde_bare::from_reader(&directory_file);
+        read_result = serde_bare::from_reader(&mut *directory_reader);
     }
-    None
+    dir_entry
 }
 
-fn search_directory(file_name: &str, directory_uri: &str, state: &Arc<DaemonState>) -> Option<DirectoryEntry> {
+//Assumes caller hold file lock
+fn search_directory_with_lock(file_name: &str, directory_uri: &str) -> Result<DirectoryEntry, VPFSError> {
+    let mut directory_file = fs::File::open(directory_uri).unwrap();
+    search_directory_with_reader(file_name, &mut directory_file)
+}
+
+fn search_directory(file_name: &str, directory_uri: &str, state: &Arc<DaemonState>) -> Result<DirectoryEntry, VPFSError> {
     let _file_access_lock = state.file_access_lock.read().unwrap();
     search_directory_with_lock(file_name, directory_uri)
 }
 
-fn append_dir_entry(directory: &str, new_entry: &DirectoryEntry, state: &Arc<DaemonState>) -> Result<(), ()>{
+fn append_dir_entry(directory: &str, new_entry: &DirectoryEntry, state: &Arc<DaemonState>) -> Result<(), VPFSError>{
     // Check if the directory entry already exists
     let _fs_lock = state.file_access_lock.write().unwrap();
-    if search_directory_with_lock(&new_entry.name, &directory).is_some() {
-        Err(())
+    if search_directory_with_lock(&new_entry.name, &directory).is_ok() {
+        Err(VPFSError::AlreadyExists)
     }
     else {
         let dir_file = fs::OpenOptions::new().append(true).open(directory).unwrap();
@@ -144,29 +214,41 @@ fn append_dir_entry(directory: &str, new_entry: &DirectoryEntry, state: &Arc<Dae
     }
 }
 
+fn add_cache_entry(location: &Location, data: &[u8], cache: &mut MutexGuard<LruCache<Location, CacheEntry>>) {
+    //let mut cache = state.cache.lock().unwrap();
+    if let Some(cache_entry) = cache.get(&location) {
+        fs::write(&cache_entry.uri, &data);
+    }
+    else {
+        let new_cache_entry = CacheEntry {
+            uri: create_file_with_random_uri(),
+        };
+        fs::write(&new_cache_entry.uri, &data);
+        cache.put(location.clone(), new_cache_entry);
+    };
+    //TODO check if cache entry needs to be evicted
+}
+
 /* ------------------- User process connection handler functions ------------------- */
-fn recursive_find(file: &str, state: &Arc<DaemonState>) -> Option<DirectoryEntry> {
+fn recursive_find(file: &str, state: &Arc<DaemonState>) -> Result<DirectoryEntry, VPFSError> {
     if let Some((parent_directory, file_name)) = file.rsplit_once('/') 
     {
-        if let Some(parent_directory_entry) = recursive_find(parent_directory, state) {
-            if !parent_directory_entry.is_dir {
-                return None;
-            }
-            let parent_dir_node = parent_directory_entry.location.node;
-            if parent_dir_node == state.local {
-                search_directory(file_name, &parent_directory_entry.location.uri, state)
-            }
-            else {
-                if let Ok(DaemonResponse::Find(entry)) = send_and_recive(&parent_dir_node, DaemonRequest::Find(file_name.to_string(), parent_directory_entry.location.uri), state){
-                    entry
+        match recursive_find(parent_directory, state) {
+            Ok(parent_dir_entry) => {
+                if !parent_dir_entry.is_dir {
+                    return Err(VPFSError::NotADirectory);
+                }
+                if parent_dir_entry.location.node == state.local {
+                    search_directory(file_name, &parent_dir_entry.location.uri, state)
                 }
                 else {
-                    panic!("mismatched response");
+                    match read_remote(&parent_dir_entry.location, state) {
+                        Ok(directory) => search_directory_with_reader(file_name, &mut BufReader::new(&*directory)),
+                        Err(error) => Err(error)
+                    }
                 }
-            }
-        }
-        else {
-            None
+            },
+            error => error
         }
     }
     // File is located in the root directory
@@ -174,11 +256,15 @@ fn recursive_find(file: &str, state: &Arc<DaemonState>) -> Option<DirectoryEntry
         if state.root == state.local {
             search_directory(file, "root", state)
         }
-        else if let Ok(DaemonResponse::Find(entry)) = send_and_recive(&state.root, DaemonRequest::Find(file.to_string(), "root".to_string()), state) {
-            entry
-        }
         else {
-            panic!("mismatched response");
+            let root_location = Location{
+                node: state.root.clone(),
+                uri: "root".to_string()
+            };
+            match read_remote(&root_location, state) {
+                Ok(root_dir) => search_directory_with_reader(file, &mut BufReader::new(&*root_dir)),
+                Err(error) => Err(error)
+            }
         }
     }
 }
@@ -187,7 +273,7 @@ fn handle_client_find(stream: &mut TcpStream, file: &str, state: &Arc<DaemonStat
     send_message(stream, ClientResponse::Find(recursive_find(file, state)));
 }
 
-fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> Option<Location>{
+fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> Result<Location, VPFSError>{
     let uri = if *at == state.local {
         create_file_with_random_uri()
     }
@@ -195,19 +281,16 @@ fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> 
         uri
     }
     else {
-        panic!("Missmatched responce");
+        return Err(VPFSError::CouldNotPlaceAtNode);
     };
     let new_file_location = Location {
         node: at.clone(),
         uri: uri
     };
-    let (parent_directory_loaction, file_name) = if let Some((parent_directory, file_name)) = path.rsplit_once('/') {
-        if let Some(parent_directory_entry) = recursive_find(parent_directory, state) {
-            (parent_directory_entry.location, file_name)
-        }
-        else {
-            todo!("Handle failure to find partent dir directory entry");
-        }
+    let (parent_directory_loaction, file_name) = 
+    if let Some((parent_directory, file_name)) = path.rsplit_once('/') {
+        let parent_directory_entry = recursive_find(parent_directory, state)?;
+        (parent_directory_entry.location, file_name)
     } else {
         (Location {
             node: state.root.clone(),
@@ -215,38 +298,49 @@ fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> 
         },
         path)
     };
-    let dir_entry = DirectoryEntry {
+    let mut dir_entry = DirectoryEntry {
         location: new_file_location.clone(),
         name: file_name.to_string(),
         is_dir: is_dir
     };
-    let success: Result<(),()>;
-    if parent_directory_loaction.node == state.local {
-        success = append_dir_entry(&parent_directory_loaction.uri, &dir_entry, state);
-        if success.is_ok() && is_dir {
-            // TODO handle adding . and .. directory entries
-        }
+
+    let success= if parent_directory_loaction.node == state.local {
+        append_dir_entry(&parent_directory_loaction.uri, &dir_entry, state)
     }
-    else if let Ok(DaemonResponse::AppendDirectoryEntry(result)) = send_and_recive(&parent_directory_loaction.node, DaemonRequest::AppendDirectoryEntry(parent_directory_loaction.uri, dir_entry), state){
-        success = result;
-        if success.is_ok() && is_dir {
-            // TODO handle adding . and .. directory entries
-        }
+    else if let Ok(DaemonResponse::AppendDirectoryEntry(result)) = send_and_recive(&parent_directory_loaction.node, DaemonRequest::AppendDirectoryEntry(parent_directory_loaction.uri.clone(), dir_entry.clone()), state){
+        result
     }
     else {
         panic!("Missmatched responce");
     };
-    if success.is_err() {
+    // Add . and .. directory entries if new file is a directory
+    if success.is_ok() && is_dir {
+        let dot_dot_entry = DirectoryEntry {
+            location: parent_directory_loaction.clone(),
+            name: "..".to_string(),
+            is_dir: true,
+        };
+        dir_entry.name = ".".to_string();
+        if *at == state.local {
+            let _ = append_dir_entry(&new_file_location.uri, &dir_entry, state);
+            let _ = append_dir_entry(&new_file_location.uri, &dot_dot_entry, state);
+        }
+        else {
+            send_and_recive::<_, DaemonResponse>(at, DaemonRequest::AppendDirectoryEntry(new_file_location.uri.clone(), dir_entry), state);
+            send_and_recive::<_, DaemonResponse>(at, DaemonRequest::AppendDirectoryEntry(new_file_location.uri.clone(), dot_dot_entry), state);
+        }
+    }
+    else if let Err(error) = success {
         if *at == state.local {
             fs::remove_file(&new_file_location.uri);
         }
         else {
             send_and_recive::<_, DaemonResponse>(at, DaemonRequest::Remove(new_file_location.uri), state);
         }
-        return None;
+        return Err(error);
     }
     
-    Some(new_file_location)
+    Ok(new_file_location)
 }
 
 fn handle_client_place(stream: &mut TcpStream, file: &str, node: Node, state: &Arc<DaemonState>) {
@@ -259,29 +353,24 @@ fn handle_client_mkdir(stream: &mut TcpStream, directory: &str, node: Node, stat
 
 fn handle_client_read(stream: &mut TcpStream, location: Location, state: &Arc<DaemonState>) {
     if location.node == state.local {
-        let mut buf = vec![];
-        let fs_lock = state.file_access_lock.read().unwrap();
-        read_local(&location.uri, &mut buf);
-        drop(fs_lock);
-        send_message(stream, ClientResponse::Read(buf.len()));                    
-        stream.write_all(&buf);
-    }
-    else if let Some(file_owner_connection) = stream_for(&location.node, &state) {
-        let mut file_owner_connection = file_owner_connection.lock().unwrap();
-        send_message(&mut file_owner_connection, DaemonRequest::Read(location.uri));
-        if let Ok(DaemonResponse::Read(file_len)) = receive_message(&mut file_owner_connection, Duration::from_millis(0)) {
-            let mut buf = vec![0u8; file_len];
-            file_owner_connection.read_exact(&mut buf);
-            drop(file_owner_connection);
-            send_message(stream, ClientResponse::Read(file_len));
+        if let Ok(buf) = read_local(&location.uri, &state.file_access_lock) {
+            send_message(stream, ClientResponse::Read(Ok(buf.len())));                    
             stream.write_all(&buf);
         }
         else {
-            panic!("Bad responce");
+            send_message(stream, ClientResponse::Read(Err(VPFSError::DoesNotExist)));
         }
     }
-    else {
-        todo!("Handle not being abble to connect");
+    else  { 
+        match read_remote(&location, state) {
+            Ok(buf) => {
+                send_message(stream, ClientResponse::Read(Ok(buf.len())));                    
+                stream.write_all(&buf);
+            }
+            Err(error) => {
+                send_message(stream, ClientResponse::Read(Err(error)));
+            }
+        }
     }
 }
 
@@ -289,10 +378,12 @@ fn handle_client_write(stream: &mut TcpStream, location: Location, file_len: usi
     if location.node == state.local {
         let mut buf = vec![0u8;file_len];
         stream.read_exact(buf.as_mut()).unwrap();
-        let fs_lock = state.file_access_lock.write().unwrap();
-        write_local(&location.uri, &buf);
-        drop(fs_lock);
-        send_message(stream, ClientResponse::Write(file_len));
+        if write_local(&location.uri, &buf, &state.file_access_lock).is_ok() {
+            send_message(stream, ClientResponse::Write(Ok(file_len)));
+        }
+        else {
+            send_message(stream, ClientResponse::Write(Err(VPFSError::DoesNotExist)));
+        }
     }
     else if let Some(file_owner_connection) = stream_for(&location.node, &state) {
         let mut file_owner_connection = file_owner_connection.lock().unwrap();
@@ -300,9 +391,9 @@ fn handle_client_write(stream: &mut TcpStream, location: Location, file_len: usi
         stream.read_exact(&mut buf);
         send_message(&mut file_owner_connection, DaemonRequest::Write(location.uri, file_len));
         file_owner_connection.write_all(&buf);
-        if let Ok(DaemonResponse::Write(bytes_writen)) = receive_message(&mut file_owner_connection, Duration::from_millis(0)) {
+        if let Ok(DaemonResponse::Write(write_result)) = receive_message(&mut file_owner_connection) {
             drop(file_owner_connection);
-            send_message(stream, ClientResponse::Write(bytes_writen));
+            send_message(stream, ClientResponse::Write(write_result));
         }
     }
     else {
@@ -312,7 +403,7 @@ fn handle_client_write(stream: &mut TcpStream, location: Location, file_len: usi
 
 fn handle_client(mut stream: TcpStream, state: Arc<DaemonState>) {
     loop {
-        match receive_message(&mut stream, Duration::from_millis(0)) {
+        match receive_message(&mut stream) {
             Ok(ClientRequest::Find(file)) => {
                 handle_client_find(&mut stream, &file, &state);
             },
@@ -339,32 +430,41 @@ fn handle_client(mut stream: TcpStream, state: Arc<DaemonState>) {
 /* ---------------------- Daemon connection handler functions ---------------------- */
 fn handle_daemon(mut stream: TcpStream, state: Arc<DaemonState>) {
     loop {        
-        match receive_message(&mut stream, state.artificial_latency) {
+        match receive_message_with_latceny(&mut stream, state.artificial_latency) {
             Ok(DaemonRequest::Place)  => {
                 let response = DaemonResponse::Place(create_file_with_random_uri());
                 send_message(&mut stream, response);
             }
-            Ok(DaemonRequest::Find ( file_name, parent_directory_uri )) => {
-                let fs_lock = state.file_access_lock.read().unwrap();
-                let response = DaemonResponse::Find(search_directory(&file_name, &parent_directory_uri, &state));
-                drop(fs_lock);
-                send_message(&mut stream, response);
-            },
-            Ok(DaemonRequest::Read( uri )) => {
-                let mut buf = vec![];
-                let fs_lock = state.file_access_lock.read().unwrap();
-                read_local( &uri, &mut buf);
-                drop(fs_lock);
-                send_message(&mut stream, DaemonResponse::Read(buf.len()));                    
-                stream.write_all(&buf);
+            Ok(DaemonRequest::Read( uri, last_modified )) => {
+                if let Some(remote_last_modified) = last_modified {
+                    let fs_lock = state.file_access_lock.read().unwrap();
+                    if let Ok(file_data) = fs::metadata(&uri) {
+                        if let Ok(local_last_modified) = file_data.modified() {
+                            if local_last_modified < remote_last_modified {
+                                drop(fs_lock);
+                                send_message(&mut stream, DaemonResponse::Read(Err(VPFSError::NotModified)));
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if let Ok(buf) = read_local(&uri, &state.file_access_lock) {
+                    send_message(&mut stream, DaemonResponse::Read(Ok(buf.len())));                    
+                    stream.write_all(&buf);
+                }
+                else {
+                    send_message(&mut stream, DaemonResponse::Read(Err(VPFSError::DoesNotExist)));
+                }
             }
             Ok(DaemonRequest::Write( uri, len)) => {
                 let mut buf = vec![0u8;len];
                 stream.read_exact(buf.as_mut()).unwrap();
-                let fs_lock = state.file_access_lock.write().unwrap();
-                write_local(&uri, &buf);
-                drop(fs_lock);
-                send_message(&mut stream, DaemonResponse::Write(len));
+                if write_local(&uri, &buf, &state.file_access_lock).is_ok() {
+                    send_message(&mut stream, DaemonResponse::Write(Ok(len)));
+                }
+                else {
+                    send_message(&mut stream, DaemonResponse::Write(Err(VPFSError::DoesNotExist)));
+                }
             }
             Ok(DaemonRequest::AppendDirectoryEntry(directory,new_entry )) => {
                 send_message(&mut stream, DaemonResponse::AppendDirectoryEntry(append_dir_entry(&directory, &new_entry, &state)));
@@ -374,7 +474,7 @@ fn handle_daemon(mut stream: TcpStream, state: Arc<DaemonState>) {
                 if fs::remove_file(uri).is_ok() {
                     send_message(&mut stream, DaemonResponse::Remove(Ok(())));
                 } else {
-                    send_message(&mut stream, DaemonResponse::Remove(Err(())));
+                    send_message(&mut stream, DaemonResponse::Remove(Err(VPFSError::DoesNotExist)));
                 }
             }
             Err(_) => {
@@ -387,7 +487,7 @@ fn handle_daemon(mut stream: TcpStream, state: Arc<DaemonState>) {
 
 /* ------------------------------- Set up functions -------------------------------- */
 fn handle_connection(mut stream: TcpStream, state: Arc<DaemonState>) {
-    match receive_message(&mut stream, state.artificial_latency) {
+    match receive_message_with_latceny(&mut stream, state.artificial_latency) {
         Ok(Hello::ClientHello) => {
             println!("User process connected");
             send_message(&mut stream, HelloResponse::ClientHello(state.local.clone()));
@@ -438,7 +538,7 @@ fn start_server(address: &str, state: Arc<DaemonState>) {
 fn setup_files_dir() {
     if let Err(err) = fs::create_dir("./files") {
         if err.kind() != std::io::ErrorKind::AlreadyExists {
-            panic!("Could not create directory for string files");
+            panic!("Could not create directory for storing files");
         }
     }
     std::env::set_current_dir("./files").expect("Could not cd into ./files directory");
@@ -446,13 +546,24 @@ fn setup_files_dir() {
 
 fn create_root(listen_port: u16, state: DaemonState) {
     setup_files_dir();
+    *state.known_hosts.lock().unwrap() = Some(HashMap::new());
+    let state_arc = Arc::new(state);
     if let Err(create_error) = fs::File::create_new("root") {
         if create_error.kind() != io::ErrorKind::AlreadyExists {
             panic!("Could not create root directory");
         }
-    };
-    *state.known_hosts.lock().unwrap() = Some(HashMap::new());
-    start_server(&format!("0.0.0.0:{listen_port}"), Arc::new(state));
+    }
+    else {
+        let mut self_link = DirectoryEntry {
+            location: Location { node: state_arc.local.clone(), uri: "root".to_string() },
+            name: ".".to_string(),
+            is_dir: true
+        };
+        let _ = append_dir_entry("root", &self_link, &state_arc);
+        self_link.name = "..".to_string();
+        let _ = append_dir_entry("root", &self_link, &state_arc);
+    }
+    start_server(&format!("0.0.0.0:{listen_port}"), state_arc);
 }
 
 fn create(listen_port: u16, mut state: DaemonState, root_addr: String) {
@@ -464,6 +575,9 @@ fn create(listen_port: u16, mut state: DaemonState, root_addr: String) {
         *known_hosts = Some(host_names);
         known_hosts.as_mut().unwrap().insert(root_node.clone(), root_addr);
         state.root = root_node;
+    }
+    else {
+        panic!("Bad hello reponce");
     }
     start_server(&format!("0.0.0.0:{listen_port}"), Arc::new(state));
 }
@@ -477,7 +591,9 @@ fn main() {
         local: Node{name: opt.name},
         connections: Mutex::new(HashMap::new()),
         known_hosts: Mutex::new(None),
-        cache: (),
+        cache: Mutex::new(LruCache::unbounded()),
+        max_cache_size: opt.cache_size,
+        used_cache_bytes: 0,
         artificial_latency: Duration::from_millis(opt.artificial_latency),
         file_access_lock: RwLock::new(()),
     };
