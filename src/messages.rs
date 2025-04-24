@@ -9,7 +9,7 @@ use std::time::SystemTime;
 pub enum Hello {
     ClientHello,
     DaemonHello,
-    RootHello(Node, u16),
+    RootHello(Node, String),
 }
 
 #[derive(Serialize,Deserialize)]
@@ -39,10 +39,10 @@ pub enum DaemonResponse {
 
 #[derive(Serialize,Deserialize)]
 pub enum ClientRequest {
-    Find(String),
+    Find(String, bool),
     Place(String, Node),
     Mkdir(String, Node),
-    Read(Location),
+    Read(Location, bool),
     Write(Location, usize),
 }
 
@@ -77,7 +77,7 @@ pub struct CacheEntry {
     pub uri: String
 }
 
-#[derive(Serialize,Deserialize,Debug)]
+#[derive(Serialize,Deserialize,Debug,Eq,PartialEq)]
 pub enum VPFSError {
     OnlyInCache,
     NotModified,
