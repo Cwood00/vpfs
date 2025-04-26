@@ -42,7 +42,7 @@ struct Opt {
 }
 
 struct DaemonState {
-    root: Node,
+    root: Option<Node>,
     local: Node,
     connections: Mutex<HashMap<Node, Arc<Mutex<TcpStream>>>>,
     known_hosts: Mutex<Option<HashMap<Node, String>>>,
@@ -246,6 +246,26 @@ fn add_cache_entry(location: &Location, data: &[u8], cache: &mut MutexGuard<LruC
             break;
         }
     }
+    let cache_file = fs::File::create("cache").expect("Failed to create cache file");
+    serde_bare::to_writer(&cache_file, &state.root).expect("Failed to save root node to file");
+    serde_bare::to_writer(&cache_file, &*used_cache).expect("Failed to save cahce size to file");
+    for (key, value) in cache.iter() {
+        serde_bare::to_writer(&cache_file, key).expect("Could not write cache entry to file");
+        serde_bare::to_writer(&cache_file, value).expect("Could not write cache entry to file");
+    }
+}
+
+fn restore_cache(state: &mut DaemonState) {
+    if let Ok(cache_file) = fs::File::open("cache") {
+        let mut cache = state.cache.lock().unwrap();
+        state.root = serde_bare::from_reader(&cache_file).expect("Failed to readed from cache file");
+        state.used_cache_bytes = serde_bare::from_reader(&cache_file).expect("Failed to readed from cache file");
+        while let Ok(key) = serde_bare::from_reader::<_, Location>(&cache_file) {
+            let value = serde_bare::from_reader(&cache_file).unwrap();
+            cache.put(key.clone(), value);
+            cache.demote(&key);
+        }
+    }
 }
 
 /* ------------------- User process connection handler functions ------------------- */
@@ -271,13 +291,13 @@ fn recursive_find(file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>)
         }
     }
     // File is located in the root directory
-    else {
-        if state.root == state.local {
+    else if let Some(root_node) = &state.root{
+        if *root_node == state.local {
             search_directory(file, "root", state)
         }
         else {
             let root_location = Location{
-                node: state.root.clone(),
+                node: root_node.clone(),
                 uri: "root".to_string()
             };
             match read_remote(&root_location, allow_stale_cache, state) {
@@ -285,6 +305,9 @@ fn recursive_find(file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>)
                 Err(error) => Err(error)
             }
         }
+    }
+    else {
+        Err(VPFSError::NotFound)
     }
 }
 
@@ -306,17 +329,23 @@ fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> 
         node: at.clone(),
         uri: uri
     };
-    let (parent_directory_loaction, file_name) = 
-    if let Some((parent_directory, file_name)) = path.rsplit_once('/') {
+    let parent_directory_loaction;
+    let file_name;
+    if let Some((parent_directory, _file_name)) = path.rsplit_once('/') {
         let parent_directory_entry = recursive_find(parent_directory, false, state)?;
-        (parent_directory_entry.location, file_name)
-    } else {
-        (Location {
-            node: state.root.clone(),
+        parent_directory_loaction = parent_directory_entry.location;
+        file_name = _file_name;
+    } 
+    else if let Some(root_node) = &state.root{
+        parent_directory_loaction = Location {
+            node: root_node.clone(),
             uri: "root".to_string()
-        },
-        path)
-    };
+        };
+        file_name = path
+    }
+    else {
+        return Err(VPFSError::CouldNotPlaceAtNode);
+    }
     let mut dir_entry = DirectoryEntry {
         location: new_file_location.clone(),
         name: file_name.to_string(),
@@ -522,7 +551,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<DaemonState>) {
             {
                 let mut known_hosts = state.known_hosts.lock().unwrap();
                 known_hosts.as_mut().unwrap().insert(connecting_node, connecting_address);
-                send_message(&mut stream, HelloResponse::RootHello(state.root.clone(), known_hosts.clone().unwrap()));
+                send_message(&mut stream, HelloResponse::RootHello(state.root.clone().unwrap(), known_hosts.clone().unwrap()));
             }
             handle_daemon(stream, state);
         },
@@ -559,8 +588,9 @@ fn setup_files_dir() {
     std::env::set_current_dir("./files").expect("Could not cd into ./files directory");
 }
 
-fn create_root(listen_port: u16, state: DaemonState) {
+fn create_root(listen_port: u16, mut state: DaemonState) {
     setup_files_dir();
+    restore_cache(&mut state);
     *state.known_hosts.lock().unwrap() = Some(HashMap::new());
     let state_arc = Arc::new(state);
     if let Err(create_error) = fs::File::create_new("root") {
@@ -583,16 +613,18 @@ fn create_root(listen_port: u16, state: DaemonState) {
 
 fn create(listen_port: u16, mut state: DaemonState, root_addr: String, listening_addr: String) {
     setup_files_dir();
-    let root_connection = TcpStream::connect(&root_addr).expect("TODO handle being offline");
-    serde_bare::to_writer(&root_connection, &Hello::RootHello(state.local.clone(), listening_addr)).unwrap();
-    if let Ok(HelloResponse::RootHello(root_node, host_names)) = serde_bare::from_reader(&root_connection,) {
-        let mut known_hosts = state.known_hosts.lock().unwrap();
-        *known_hosts = Some(host_names);
-        known_hosts.as_mut().unwrap().insert(root_node.clone(), root_addr);
-        state.root = root_node;
-    }
-    else {
-        panic!("Bad hello reponce");
+    restore_cache(&mut state);
+    if let Ok(root_connection) = TcpStream::connect(&root_addr) {
+        serde_bare::to_writer(&root_connection, &Hello::RootHello(state.local.clone(), listening_addr)).unwrap();
+        if let Ok(HelloResponse::RootHello(root_node, host_names)) = serde_bare::from_reader(&root_connection,) {
+            let mut known_hosts = state.known_hosts.lock().unwrap();
+            *known_hosts = Some(host_names);
+            known_hosts.as_mut().unwrap().insert(root_node.clone(), root_addr);
+            state.root = Some(root_node);
+        }
+        else {
+            panic!("Bad hello reponce");
+        }
     }
     start_server(&format!("0.0.0.0:{listen_port}"), Arc::new(state));
 }
@@ -602,7 +634,7 @@ fn main() {
     let opt = Opt::parse();
 
     let state = DaemonState {
-        root: if opt.root_addr.is_some() {Default::default()} else {Node{name: opt.name.clone()}},
+        root: if opt.root_addr.is_some() {None} else {Some(Node{name: opt.name.clone()})},
         local: Node{name: opt.name},
         connections: Mutex::new(HashMap::new()),
         known_hosts: Mutex::new(None),

@@ -73,6 +73,7 @@ pub struct DirectoryEntry {
     pub is_dir: bool
 }
 
+#[derive(Serialize,Deserialize,Clone,Eq,Hash,PartialEq,Debug)]
 pub struct CacheEntry {
     pub uri: String
 }
@@ -86,5 +87,4 @@ pub enum VPFSError {
     NotADirectory,
     AlreadyExists,
     CouldNotPlaceAtNode,
-    Other
 }
