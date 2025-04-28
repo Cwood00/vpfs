@@ -1,8 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::clone;
-use std::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex};
 use std::time::SystemTime;
 
 #[derive(Serialize,Deserialize)]
@@ -26,6 +23,7 @@ pub enum DaemonRequest {
     Write(String, usize),
     Remove(String),
     AppendDirectoryEntry(String, DirectoryEntry),
+    AddressFor(Node)
 }
 
 #[derive(Serialize,Deserialize)]
@@ -35,6 +33,7 @@ pub enum DaemonResponse {
     Write(Result<usize, VPFSError>),
     Remove(Result<(), VPFSError>),
     AppendDirectoryEntry(Result<(), VPFSError>),
+    AddressFor(Option<String>)
 }
 
 #[derive(Serialize,Deserialize)]
@@ -42,7 +41,7 @@ pub enum ClientRequest {
     Find(String, bool),
     Place(String, Node),
     Mkdir(String, Node),
-    Read(Location, bool),
+    Read(Location),
     Write(Location, usize),
 }
 
@@ -80,11 +79,12 @@ pub struct CacheEntry {
 
 #[derive(Serialize,Deserialize,Debug,Eq,PartialEq)]
 pub enum VPFSError {
-    OnlyInCache,
+    OnlyInCache(Location),
     NotModified,
-    DoesNotExist, // We can verify that the file does not exist
-    NotFound,     // We can not find the file. File may or may not exist
+    DoesNotExist,  // We can verify that the file does not exist
+    NotFound,      // We can not find the file. File may or may not exist
+    NotAccessible, // We can not access the node need to complete request
     NotADirectory,
-    AlreadyExists,
-    CouldNotPlaceAtNode,
+    AlreadyExists(DirectoryEntry),
+    Other(String),
 }
