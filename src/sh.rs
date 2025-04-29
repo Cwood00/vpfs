@@ -32,16 +32,33 @@ enum PipeableCommand {
 impl Command {
 
     fn forward_reads<T: Write>(location: Location, mut pipe: T, vpfs: Arc<VPFS>) {
-        if let Ok(data) = vpfs.read(location) {
-            match pipe.write_all(&data) {
-                Ok(_bytes_writen) => {},
-                Err(error) => {
-                    println!("Got {} error trying to write to pipe", error);
+        match vpfs.read(location){
+            Ok(data) => {
+                match pipe.write_all(&data) {
+                    Ok(_bytes_writen) => {},
+                    Err(error) => {
+                        println!("Got {} error trying to write to pipe", error);
+                    }
+                };
+            }
+            Err(VPFSError::OnlyInCache(cache_location)) => {
+                let mut buf = String::new();
+                loop {
+                    println!("File only available in cache. Use cached versoin? (y or n)");
+                    io::stdin().read_line(&mut buf).unwrap();
+                    match buf.trim() {
+                        "y" => {
+                            Command::forward_reads(cache_location, pipe, vpfs);
+                            break;
+                        }
+                        "n" => break,
+                        _ => continue,
+                    }
                 }
-            };
-        }
-        else {
-            println!("No longer able to right to file");
+            }
+            Err(_) => {
+                println!("No longer able to right to file");
+            }
         }
     }
 
@@ -68,13 +85,30 @@ impl Command {
         match self.stdin {
             RedirectType::NoRedirect => {},
             RedirectType::File(stdin_file) => {
-                let directory_entry = vpfs.find(stdin_file.as_str(), false);
-                if let Ok(directory_entry) = directory_entry {
-                    stdin_location = Some(directory_entry.location);
-                }
-                else {
-                    println!("Could not locate {:?}", stdin_file);
-                    return Err(io::Error::from(io::ErrorKind::NotFound));
+                match vpfs.find(stdin_file.as_str()) {
+                    Ok(directory_entry) =>  {
+                        stdin_location = Some(directory_entry.location);
+                    },
+                    Err(VPFSError::CacheNeededForTraversal(directory_entry)) => {
+                        let mut buf = String::new();
+                        loop {
+                            println!("Cache needed for directory travesal. Continue? (y or n)");
+                            io::stdin().read_line(&mut buf).unwrap();
+                            match buf.trim() {
+                                "y" => {
+                                    stdin_location = Some(directory_entry.location);
+                                    break;
+                                }
+                                "n" => return Err(io::Error::from(io::ErrorKind::NotFound)),
+                                _ => continue,
+                            }
+                        }
+
+                    }
+                    _ => {
+                        println!("Could not locate {:?}", stdin_file);
+                        return Err(io::Error::from(io::ErrorKind::NotFound));
+                    }
                 }
                 process_command.stdin(Stdio::piped());
             }
@@ -282,7 +316,7 @@ fn run_cd(command: Command, vpfs: Arc<VPFS>, cwd: &mut String){
         if full_path == "" {
             *cwd = String::from("");
         }
-        else if let Ok(directory_entry) = vpfs.find(&full_path, false) {
+        else if let Ok(directory_entry) = vpfs.find(&full_path) {
             if directory_entry.is_dir {
                 *cwd = full_path.clone();
             }
@@ -313,10 +347,10 @@ fn run_mkdir(command: Command, vpfs: Arc<VPFS>, cwd: &str) {
 
 fn run_ls(command: Command, vpfs: Arc<VPFS>, cwd: &str) {
     let fetch_result = if cwd == "" {
-        vpfs.fetch(".", false)
+        vpfs.fetch(".")
     }
     else {
-        vpfs.fetch(cwd, false)
+        vpfs.fetch(cwd)
     };
     if let Ok(directory_data) = fetch_result {
         let mut directory_reader = BufReader::new(&*directory_data);

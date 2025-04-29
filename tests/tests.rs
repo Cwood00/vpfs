@@ -2,7 +2,7 @@ use vpfs::*;
 use vpfs::messages::*;
 
 const LOCAL_PORT: u16 = 8080;
-const REMOTE_NAME: &str = "iroh";
+const REMOTE_NAME: &str = "remote";
 
 #[test]
 fn find_and_place_root_directory_remote() {
@@ -13,7 +13,7 @@ fn find_and_place_root_directory_remote() {
 
     let place_ret = vpfs.place(file_name, root_node);
     assert!(place_ret.is_ok());
-    let find_ret = vpfs.find(file_name, false);
+    let find_ret = vpfs.find(file_name);
     assert!(find_ret.is_ok());
     assert_eq!(place_ret.unwrap(), find_ret.unwrap().location);
 }
@@ -26,7 +26,7 @@ fn find_and_place_root_directory_local() {
 
     let place_ret = vpfs.place(file_name, vpfs.local.clone());
     assert!(place_ret.is_ok());
-    let find_ret = vpfs.find(file_name, false);
+    let find_ret = vpfs.find(file_name);
     assert!(find_ret.is_ok());
     assert_eq!(place_ret.unwrap(), find_ret.unwrap().location);
 }
@@ -66,7 +66,7 @@ fn store_root_directory_local() {
     let vpfs = VPFS::connect(LOCAL_PORT).unwrap();
 
     vpfs.store(file_name, data);
-    let location = vpfs.find(file_name, false);
+    let location = vpfs.find(file_name);
     assert!(location.is_ok());
     assert_eq!(vpfs.read(location.unwrap().location).unwrap(), data);
 }
@@ -79,7 +79,7 @@ fn fetch_root_directory_local() {
     let vpfs = VPFS::connect(LOCAL_PORT).unwrap();
 
     vpfs.store(file_name, data);
-    assert_eq!(vpfs.fetch(file_name, false).unwrap(), data);
+    assert_eq!(vpfs.fetch(file_name).unwrap(), data);
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn fetch_root_directory_remote() {
 
     let location = vpfs.place(file_name, root_node).unwrap();
     vpfs.write(location, data);
-    assert_eq!(vpfs.fetch(file_name, false).unwrap(), data);
+    assert_eq!(vpfs.fetch(file_name).unwrap(), data);
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn find_and_place_non_root_directory_remote() {
     assert!(mkdir_ret.is_ok());
     let place_ret = vpfs.place(file_name, root_node);
     assert!(place_ret.is_ok());
-    let find_ret = vpfs.find(file_name, false);
+    let find_ret = vpfs.find(file_name);
     assert!(find_ret.is_ok());
     assert_eq!(place_ret.unwrap(), find_ret.unwrap().location);
 }
@@ -123,7 +123,7 @@ fn find_and_place_non_root_directory_local() {
     assert!(mkdir_ret.is_ok());
     let place_ret = vpfs.place(file_name, vpfs.local.clone());
     assert!(place_ret.is_ok());
-    let find_ret = vpfs.find(file_name, false);
+    let find_ret = vpfs.find(file_name);
     assert!(find_ret.is_ok());
     assert_eq!(place_ret.unwrap(), find_ret.unwrap().location);
 }
@@ -173,7 +173,7 @@ fn store_non_root_directory_remote() {
     let mkdir_ret = vpfs.mkdir(dir_name, root_node);
     assert!(mkdir_ret.is_ok());
     vpfs.store(file_name, data);
-    let location = vpfs.find(file_name, false);
+    let location = vpfs.find(file_name);
     assert!(location.is_ok());
     assert_eq!(vpfs.read(location.unwrap().location).unwrap(), data);
 }
@@ -190,7 +190,7 @@ fn fetch_non_root_directory_local() {
     let mkdir_ret = vpfs.mkdir(dir_name, root_node);
     assert!(mkdir_ret.is_ok());
     vpfs.store(file_name, data);
-    assert_eq!(vpfs.fetch(file_name, false).unwrap(), data);
+    assert_eq!(vpfs.fetch(file_name).unwrap(), data);
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn fetch_non_root_directory_remote() {
     assert!(mkdir_ret.is_ok());
     let location = vpfs.place(file_name, root_node).unwrap();
     vpfs.write(location, data);
-    assert_eq!(vpfs.fetch(file_name, false).unwrap(), data);
+    assert_eq!(vpfs.fetch(file_name).unwrap(), data);
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn multiple_nested_directories(){
     assert!(mkdir_ret.is_ok());
 
     vpfs.store(&file_name1, file_data1);
-    assert_eq!(vpfs.fetch(file_name1, false).unwrap(), file_data1);
+    assert_eq!(vpfs.fetch(file_name1).unwrap(), file_data1);
 
     let location = vpfs.place(&file_name2, root_node).unwrap();
     vpfs.write(location.clone(), file_data2);

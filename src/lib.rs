@@ -47,8 +47,8 @@ impl VPFS {
         resp
     }
 
-    pub fn find(&self, path: &str, allow_stale_cache: bool) -> Result<DirectoryEntry, VPFSError> {
-        if let ClientResponse::Find(find_result) = self.send_request(ClientRequest::Find(path.to_string(), allow_stale_cache)) {
+    pub fn find(&self, path: &str) -> Result<DirectoryEntry, VPFSError> {
+        if let ClientResponse::Find(find_result) = self.send_request(ClientRequest::Find(path.to_string())) {
             find_result
         }
         else {
@@ -92,7 +92,7 @@ impl VPFS {
     pub fn write(&self, what: Location, buf: &[u8]) -> Result<(), VPFSError> {
         let mut stream = self.connection.lock().unwrap();
         self.send_request_async(&stream, ClientRequest::Write(what, buf.len()));
-        stream.write(buf);
+        stream.write_all(buf);
 
         match self.receive_response_async(&stream) {
             ClientResponse::Write(Ok(len)) => {
@@ -106,8 +106,8 @@ impl VPFS {
         }
     }
 
-    pub fn fetch(&self, name: &str, allow_stale_cache: bool) -> Result<Vec<u8>, VPFSError> {
-        let dir_entry = self.find(name, allow_stale_cache)?;
+    pub fn fetch(&self, name: &str) -> Result<Vec<u8>, VPFSError> {
+        let dir_entry = self.find(name)?;
         self.read(dir_entry.location)
     }
 
