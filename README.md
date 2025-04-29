@@ -1,3 +1,5 @@
 ## VPFS Prototype
 
-This is the prototype VPFS implementation used in the 2024 VPFS NSF proposal with Debaleena Chattopahyay.
+This is the prototype VPFS implementation used for my masters program.
+
+Based on initial proposal by Jakob Eriksson and Debaleena Chattopahyay.
