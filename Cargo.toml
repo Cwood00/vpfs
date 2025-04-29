@@ -14,8 +14,13 @@ clap = { version = "4.0", features = ["derive"] }
 rand = "0.9.0"
 lru = "0.14.0"
 
-# [[bin]]
-# name="client"
+[[bin]]
+name="daemon"
+path="src/daemon.rs"
+
+[[bin]]
+name="sh"
+path="src/sh.rs"
 
 [[debug]]
 debug=true
