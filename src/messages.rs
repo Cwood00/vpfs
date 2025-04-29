@@ -39,7 +39,7 @@ pub enum DaemonResponse {
 
 #[derive(Serialize,Deserialize)]
 pub enum ClientRequest {
-    Find(String, bool),
+    Find(String),
     Place(String, Node),
     Mkdir(String, Node),
     Read(Location),
@@ -81,6 +81,7 @@ pub struct CacheEntry {
 #[derive(Serialize,Deserialize,Debug,Eq,PartialEq)]
 pub enum VPFSError {
     OnlyInCache(Location),
+    CacheNeededForTraversal(DirectoryEntry),
     NotModified,
     DoesNotExist,  // We can verify that the file does not exist
     NotFound,      // We can not find the file. File may or may not exist

@@ -294,10 +294,10 @@ fn restore_cache(state: &mut DaemonState) {
 }
 
 /* ------------------- User process connection handler functions ------------------- */
-fn recursive_find(file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>) -> Result<DirectoryEntry, VPFSError> {
+fn recursive_find(file: &str, state: &Arc<DaemonState>) -> Result<DirectoryEntry, VPFSError> {
     if let Some((parent_directory, file_name)) = file.rsplit_once('/') 
     {
-        match recursive_find(parent_directory, allow_stale_cache, state) {
+        match recursive_find(parent_directory, state) {
             Ok(parent_dir_entry) => {
                 if !parent_dir_entry.is_dir {
                     return Err(VPFSError::NotADirectory);
@@ -308,11 +308,56 @@ fn recursive_find(file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>)
                 else {
                     match read_remote(&parent_dir_entry.location, state) {
                         Ok(directory) => search_directory_with_reader(file_name, &mut BufReader::new(&*directory)),
-                        Err(VPFSError::OnlyInCache(cache_location)) => todo!(),
+                        Err(VPFSError::OnlyInCache(cache_location)) => {
+                            let dir_entry = search_directory(file_name, &cache_location.uri, state);
+                            if let Ok(dir_entry) = dir_entry {
+                                Err(VPFSError::CacheNeededForTraversal(dir_entry))
+                            }
+                            else {
+                                dir_entry
+                            }
+                        },
                         Err(error) => Err(error)
                     }
                 }
             },
+            Err(VPFSError::CacheNeededForTraversal(parent_dir_entry)) => {
+                if !parent_dir_entry.is_dir {
+                    return Err(VPFSError::NotADirectory);
+                }
+                if parent_dir_entry.location.node == state.local {
+                    let dir_entry = search_directory(file_name, &parent_dir_entry.location.uri, state);
+                    if let Ok(dir_entry) = dir_entry {
+                        Err(VPFSError::CacheNeededForTraversal(dir_entry))
+                    }
+                    else {
+                        dir_entry
+                    }
+                }
+                else {
+                    match read_remote(&parent_dir_entry.location, state) {
+                        Ok(directory) => {
+                            let dir_entry = search_directory_with_reader(file_name, &mut BufReader::new(&*directory));
+                            if let Ok(dir_entry) = dir_entry {
+                                Err(VPFSError::CacheNeededForTraversal(dir_entry))
+                            }
+                            else {
+                                dir_entry
+                            }
+                        },
+                        Err(VPFSError::OnlyInCache(cache_location)) => {
+                            let dir_entry = search_directory(file_name, &cache_location.uri, state);
+                            if let Ok(dir_entry) = dir_entry {
+                                Err(VPFSError::CacheNeededForTraversal(dir_entry))
+                            }
+                            else {
+                                dir_entry
+                            }
+                        },
+                        Err(error) => Err(error)
+                    }
+                }
+            }
             error => error
         }
     }
@@ -328,7 +373,15 @@ fn recursive_find(file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>)
             };
             match read_remote(&root_location, state) {
                 Ok(root_dir) => search_directory_with_reader(file, &mut BufReader::new(&*root_dir)),
-                Err(VPFSError::OnlyInCache(cache_location)) => todo!(),
+                Err(VPFSError::OnlyInCache(cache_location)) => {
+                    let dir_entry = search_directory(file, &cache_location.uri, state);
+                    if let Ok(dir_entry) = dir_entry {
+                        Err(VPFSError::CacheNeededForTraversal(dir_entry))
+                    }
+                    else {
+                        dir_entry
+                    }
+                },
                 Err(error) => Err(error)
             }
         }
@@ -338,8 +391,8 @@ fn recursive_find(file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>)
     }
 }
 
-fn handle_client_find(stream: &mut TcpStream, file: &str, allow_stale_cache: bool, state: &Arc<DaemonState>) {
-    send_message(stream, ClientResponse::Find(recursive_find(file, allow_stale_cache, state)));
+fn handle_client_find(stream: &mut TcpStream, file: &str, state: &Arc<DaemonState>) {
+    send_message(stream, ClientResponse::Find(recursive_find(file, state)));
 }
 
 fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> Result<Location, VPFSError>{
@@ -359,7 +412,7 @@ fn place_file(path: &str, at: &Node, is_dir: bool, state: &Arc<DaemonState>) -> 
     let parent_directory_loaction;
     let file_name;
     if let Some((parent_directory, _file_name)) = path.rsplit_once('/') {
-        let parent_directory_entry = recursive_find(parent_directory, false, state)?;
+        let parent_directory_entry = recursive_find(parent_directory, state)?;
         parent_directory_loaction = parent_directory_entry.location;
         file_name = _file_name;
     } 
@@ -480,8 +533,8 @@ fn handle_client_write(stream: &mut TcpStream, location: Location, file_len: usi
 fn handle_client(mut stream: TcpStream, state: Arc<DaemonState>) {
     loop {
         match receive_message(&mut stream) {
-            Ok(ClientRequest::Find(file, allow_stale_cache)) => {
-                handle_client_find(&mut stream, &file, allow_stale_cache, &state);
+            Ok(ClientRequest::Find(file)) => {
+                handle_client_find(&mut stream, &file, &state);
             },
             Ok(ClientRequest::Place(file, node )) => {
                 handle_client_place(&mut stream, &file, node,  &state);
